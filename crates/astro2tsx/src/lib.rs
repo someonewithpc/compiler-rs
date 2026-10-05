@@ -17,8 +17,10 @@ mod types;
 mod utf16;
 mod utils;
 
-use biome_html_parser::parse_html;
+use biome_html_parser::{HtmlParse, parse_html};
+use biome_html_syntax::HtmlSyntaxKind;
 use biome_languages::HtmlFileSource;
+use biome_rowan::{Direction, TextRange, TextSize};
 
 pub use crate::types::{
     Diagnostic, DiagnosticSeverity, ExtractedKind, ExtractedScriptType, ExtractedTag,
@@ -64,13 +66,67 @@ pub struct ConvertResult {
     pub frontmatter: FrontmatterInfo,
 }
 
+/// Parses `source` with every `<?` the HTML parser reads in markup position
+/// treated as a bogus comment, the way the HTML tokenizer and the build compiler
+/// read it: the comment runs to the first `>`, or to the end of the source.
+///
+/// Returns the parse and the source ranges of those bogus comments. The parser
+/// sees each range as a same-length placeholder, an empty HTML comment when the
+/// range is long enough for one and whitespace otherwise, so every node range
+/// still indexes into `source`.
+fn parse_template(source: &str) -> (HtmlParse, Vec<TextRange>) {
+    // Biome's Astro lexer never yields the `?>` that closes its processing
+    // instruction node, and the failed instruction swallows the rest of the
+    // document. Each pass therefore finds the next instruction, masks it, and
+    // parses again.
+    let mut masked: Option<String> = None;
+    let mut ranges = Vec::new();
+    loop {
+        let parse = parse_html(
+            masked.as_deref().unwrap_or(source),
+            (&HtmlFileSource::astro()).into(),
+        );
+        let starts: Vec<usize> = parse
+            .syntax()
+            .descendants_tokens(Direction::Next)
+            .filter(|token| token.kind() == HtmlSyntaxKind::PI_START)
+            .map(|token| u32::from(token.text_trimmed_range().start()) as usize)
+            .collect();
+        if starts.is_empty() {
+            return (parse, ranges);
+        }
+        let text = masked.get_or_insert_with(|| source.to_string());
+        let mut previous_end = 0;
+        for start in starts {
+            if start < previous_end {
+                continue;
+            }
+            let end = source[start..]
+                .find('>')
+                .map_or(source.len(), |offset| start + offset + 1);
+            let len = end - start;
+            let placeholder = if len >= "<!---->".len() {
+                format!("<!--{}-->", " ".repeat(len - "<!---->".len()))
+            } else {
+                " ".repeat(len)
+            };
+            text.replace_range(start..end, &placeholder);
+            ranges.push(TextRange::new(
+                TextSize::from(start as u32),
+                TextSize::from(end as u32),
+            ));
+            previous_end = end;
+        }
+    }
+}
+
 pub fn convert_to_tsx(source: &str, options: ConvertOptions) -> ConvertResult {
-    let parse = parse_html(source, (&HtmlFileSource::astro()).into());
+    let (parse, bogus_comments) = parse_template(source);
     let root = parse.tree();
 
     let mut printer = printer::Printer::new(source);
     let (component_name_range, generated_component_export, frontmatter_terminator_anchor) =
-        render::render_root(&mut printer, root, &options);
+        render::render_root(&mut printer, root, &bogus_comments, &options);
 
     let mut diagnostics: Vec<Diagnostic> = parse
         .diagnostics()

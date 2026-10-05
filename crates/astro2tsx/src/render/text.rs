@@ -95,6 +95,16 @@ pub(super) fn emit_source_gap(printer: &mut Printer, from: u32, to: u32) {
         }
         write_source_gap_text(printer, cursor as u32, start as u32);
         let text = &source[start..end];
+        if let Some(data) = text.strip_prefix('<').filter(|data| data.starts_with('?')) {
+            // Bogus comment data runs from the `?` up to the closing `>`.
+            emit_html_comment(
+                printer,
+                data.strip_suffix('>').unwrap_or(data),
+                start as u32 + 1,
+            );
+            cursor = end;
+            continue;
+        }
         match text
             .strip_prefix("<!--")
             .and_then(|t| t.strip_suffix("-->"))

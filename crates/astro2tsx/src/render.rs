@@ -9,7 +9,7 @@ pub(crate) use extracted::{script_type_for_attr, style_lang_for_attr};
 use text::{comment_trivia_ranges, emit_source_gap};
 
 use biome_html_syntax::HtmlRoot;
-use biome_rowan::{AstNode, AstNodeList};
+use biome_rowan::{AstNode, AstNodeList, TextRange};
 
 use crate::ConvertOptions;
 use crate::printer::{Printer, range_start};
@@ -21,9 +21,14 @@ const TSX_PREFIX: &str = "/* @jsxImportSource astro */\n";
 pub(crate) fn render_root(
     printer: &mut Printer,
     root: HtmlRoot,
+    bogus_comments: &[TextRange],
     options: &ConvertOptions,
 ) -> (GeneratedRange, Option<GeneratedRange>, Option<u32>) {
-    printer.comment_ranges = comment_trivia_ranges(&root);
+    let mut comment_ranges = comment_trivia_ranges(&root);
+    comment_ranges.extend_from_slice(bogus_comments);
+    comment_ranges.sort_by_key(|range| (range.start(), range.end()));
+    comment_ranges.dedup();
+    printer.comment_ranges = comment_ranges;
     let frontmatter_node = root.frontmatter();
     printer.map_nil();
     printer.write(TSX_PREFIX);
